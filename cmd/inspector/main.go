@@ -1,180 +1,139 @@
+// Package main 是 k8s-inspector 的入口。
+//
+// 支持两种运行模式：
+//   - 单次执行（--once，默认用于 Kubernetes CronJob）
+//   - 按固定间隔循环巡检（--interval，默认 1 小时）
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
-	"k8s-inspector/pkg/api/dify"
-	"k8s-inspector/pkg/config"
-	"k8s-inspector/pkg/service/inspector"
-	"k8s-inspector/pkg/service/report"
-	"k8s-inspector/pkg/types"
+	"github.com/ithina/k8s-inspector/pkg/api/dify"
+	"github.com/ithina/k8s-inspector/pkg/config"
+	"github.com/ithina/k8s-inspector/pkg/service/inspector"
+	"github.com/ithina/k8s-inspector/pkg/service/report"
 )
 
-func run(ctx context.Context) error {
-	// 初始化zap日志
+// version 由构建流程通过 -ldflags "-X main.version=..." 注入
+var version = "dev"
+
+const (
+	// inspectionTimeout 单次巡检整体超时
+	inspectionTimeout = 30 * time.Minute
+	// wechatMessageLimit 企业微信 markdown 消息长度上限（字节）
+	wechatMessageLimit = 4000
+	// wechatTruncatedSuffix 消息截断时追加的提示
+	wechatTruncatedSuffix = "\n\n...\n\n⚠️ 报告内容过长，已截断。请查看完整报告获取详细信息。"
+)
+
+func main() {
+	var (
+		once        = flag.Bool("once", false, "执行单次巡检后退出（适用于 Kubernetes CronJob）")
+		interval    = flag.Duration("interval", time.Hour, "循环巡检间隔（未指定 --once 时生效）")
+		showVersion = flag.Bool("version", false, "打印版本信息并退出")
+	)
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("k8s-inspector %s\n", version)
+		return
+	}
+	if !*once && *interval <= 0 {
+		fmt.Fprintln(os.Stderr, "Error: --interval 必须大于 0")
+		os.Exit(1)
+	}
+
+	// 监听 SIGINT/SIGTERM，支持优雅退出（容器滚动更新等场景）
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	logger, err := zap.NewProduction()
 	if err != nil {
-		return fmt.Errorf("failed to initialize logger: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: 初始化日志失败: %v\n", err)
+		os.Exit(1)
 	}
 	defer logger.Sync()
+
 	sugar := logger.Sugar()
 
 	// 加载配置
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		return errors.Wrap(err, "failed to load config")
+		sugar.Errorf("加载配置失败: %v", err)
+		os.Exit(1)
 	}
 	sugar.Info("configuration loaded successfully")
 
-	// 初始化巡检器
+	// 初始化巡检器（复用同一个实例，循环模式下每轮巡检重新采集数据）
 	ins, err := inspector.NewInspector(cfg, logger)
 	if err != nil {
-		return errors.Wrap(err, "failed to initialize inspector")
+		sugar.Errorf("初始化巡检器失败: %v", err)
+		os.Exit(1)
 	}
 	sugar.Info("inspector initialized successfully")
 
+	for {
+		if err := run(ctx, cfg, ins, logger); err != nil {
+			sugar.Errorf("巡检执行失败: %v", err)
+			if *once {
+				os.Exit(1)
+			}
+		}
+		if *once {
+			return
+		}
+		sugar.Infof("下次巡检将在 %v 后执行", *interval)
+		select {
+		case <-ctx.Done():
+			sugar.Info("收到退出信号，停止巡检")
+			return
+		case <-time.After(*interval):
+		}
+	}
+}
+
+// run 执行一轮完整巡检：采集数据 -> 生成 HTML 报告 -> 构建通知摘要 -> AI 优化建议 -> 企业微信推送。
+// 可选模块（Dify/企业微信）未配置或调用失败时降级运行，不中断主流程。
+func run(ctx context.Context, cfg *config.Config, ins *inspector.Inspector, logger *zap.Logger) error {
+	sugar := logger.Sugar()
+
+	runCtx, cancel := context.WithTimeout(ctx, inspectionTimeout)
+	defer cancel()
+
 	// 执行巡检
-	inspectionReport, err := ins.RunInspection(ctx)
+	inspectionReport, err := ins.RunInspection(runCtx)
 	if err != nil {
 		return errors.Wrap(err, "failed to run inspection")
 	}
 	sugar.Info("inspection completed successfully")
 
-	// 生成本地报告
-	sugar.Info("开始生成本地报告")
-	sugar.Infow("报告输出目录", "path", cfg.ReportOutputDir)
-
-	// 直接使用标准输出作为logger，确保日志可见
-	fmt.Println("=== HTML报告生成日志 ===")
+	// 生成本地 HTML 报告（失败不中断后续通知流程）
 	if err := report.GenerateReport(inspectionReport, cfg, os.Stdout); err != nil {
-		sugar.Errorw("生成报告失败", "error", err)
-		fmt.Printf("生成报告失败: %v\n", err)
-		// 继续执行，不中断流程
-	} else {
-		sugar.Info("报告生成成功")
-		fmt.Println("报告生成成功")
+		sugar.Errorw("生成HTML报告失败", "error", err)
 	}
-	fmt.Println("=== HTML报告生成完成 ===")
-	sugar.Info("生成本地报告完成")
 
-	// 获取巡检报告摘要
+	// 构建通知摘要
 	summaryReport := report.BuildNotificationMessage(inspectionReport, cfg)
 	if len(summaryReport) == 0 {
 		return errors.New("inspection report summary is empty")
 	}
+	summaryReport += report.BuildCapacitySummary(inspectionReport)
 
-	// 添加容量相关指标，采用极简展示方式，企业微信只展示关键汇总信息
-	summaryReport += "\n\n**📊 容量优化指标**\n"
-
-	// 计算集群级别的聚合指标
-	var totalMemoryUsage float64
-	var totalPodCount int
-	var nodeCount int
-	var highMemNodes []types.NodeStatus // 内存使用率 > 80%
-	var lowMemNodes []types.NodeStatus  // 内存使用率 < 30%
-	var highPodNodes []types.NodeStatus // POD数量 > 50
-	var lowPodNodes []types.NodeStatus  // POD数量 < 20
-	var normalNodes []types.NodeStatus  // 正常节点
-
-	for _, node := range inspectionReport.Nodes {
-		if node.Status == "Ready" {
-			totalMemoryUsage += node.MemoryUsage
-			totalPodCount += node.PodCount
-			nodeCount++
-
-			// 分级统计节点
-			if node.MemoryUsage > 80 {
-				highMemNodes = append(highMemNodes, node)
-			} else if node.MemoryUsage < 30 {
-				lowMemNodes = append(lowMemNodes, node)
-			}
-
-			if node.PodCount > 50 {
-				highPodNodes = append(highPodNodes, node)
-			} else if node.PodCount < 20 {
-				lowPodNodes = append(lowPodNodes, node)
-			} else {
-				normalNodes = append(normalNodes, node)
-			}
-		}
-	}
-
-	if nodeCount > 0 {
-		averagePodCount := totalPodCount / nodeCount
-
-		// 展示集群级别的聚合指标（企业微信只需要汇总信息）
-		summaryReport += fmt.Sprintf("- 集群平均POD密度: %d个/节点\n", averagePodCount)
-		summaryReport += fmt.Sprintf("- 高内存使用率节点 (>80%%): %d\n", len(highMemNodes))
-		summaryReport += fmt.Sprintf("- 低内存使用率节点 (<30%%): %d\n", len(lowMemNodes))
-		summaryReport += fmt.Sprintf("- 高POD密度节点 (>50个): %d\n", len(highPodNodes))
-		summaryReport += fmt.Sprintf("- 低POD密度节点 (<20个): %d\n", len(lowPodNodes))
-
-		// 只展示最严重的几个异常节点（最多5个），其他只显示数量
-		maxDisplayNodes := 5
-
-		// 高内存使用率节点（最严重，优先展示）
-		if len(highMemNodes) > 0 {
-			summaryReport += fmt.Sprintf("\n**⚠️ 高内存使用率节点** (%d个)\n", len(highMemNodes))
-			displayCount := len(highMemNodes)
-			if displayCount > maxDisplayNodes {
-				displayCount = maxDisplayNodes
-			}
-			for i := 0; i < displayCount; i++ {
-				node := highMemNodes[i]
-				summaryReport += fmt.Sprintf("- %s: 内存使用率 %.1f%%, POD数量 %d\n",
-					node.Name, node.MemoryUsage, node.PodCount)
-			}
-			if len(highMemNodes) > maxDisplayNodes {
-				summaryReport += fmt.Sprintf("- ... 还有 %d 个节点，请查看完整报告\n", len(highMemNodes)-maxDisplayNodes)
-			}
-		}
-
-		// 高POD密度节点（次严重）
-		if len(highPodNodes) > 0 {
-			summaryReport += fmt.Sprintf("\n**⚠️ 高POD密度节点** (%d个)\n", len(highPodNodes))
-			displayCount := len(highPodNodes)
-			if displayCount > maxDisplayNodes {
-				displayCount = maxDisplayNodes
-			}
-			for i := 0; i < displayCount; i++ {
-				node := highPodNodes[i]
-				summaryReport += fmt.Sprintf("- %s: 内存使用率 %.1f%%, POD数量 %d\n",
-					node.Name, node.MemoryUsage, node.PodCount)
-			}
-			if len(highPodNodes) > maxDisplayNodes {
-				summaryReport += fmt.Sprintf("- ... 还有 %d 个节点，请查看完整报告\n", len(highPodNodes)-maxDisplayNodes)
-			}
-		}
-
-		// 低内存使用率和低POD密度节点只显示数量，不展示详细列表
-		if len(lowMemNodes) > 0 {
-			summaryReport += fmt.Sprintf("\n**⚠️ 低内存使用率节点** (%d个)，请查看完整报告了解详情\n", len(lowMemNodes))
-		}
-
-		if len(lowPodNodes) > 0 {
-			summaryReport += fmt.Sprintf("**⚠️ 低POD密度节点** (%d个)，请查看完整报告了解详情\n", len(lowPodNodes))
-		}
-
-		// 引导用户查看完整HTML报告获取详细信息
-		summaryReport += "\n💡 完整节点详细信息请查看HTML报告\n"
-	}
-
-	// 初始化最终报告
+	// 可选：请求 Dify 生成 AI 优化建议（失败时降级为基础报告）
 	finalReport := summaryReport
-
-	// 如果配置了Dify，请求获取优化建议
 	if cfg.DifyBaseURL != "" && cfg.DifyAPIKey != "" {
-		// 初始化 Dify 客户端
 		difyClient := dify.NewClient(cfg.DifyBaseURL, cfg.DifyAPIKey, cfg.Timeout, logger)
-
-		// 构建 Dify 请求参数
 		payload := map[string]interface{}{
 			"inputs":          make(map[string]interface{}),
 			"query":           summaryReport,
@@ -183,46 +142,46 @@ func run(ctx context.Context) error {
 			"user":            "cluster-inspector",
 		}
 
-		// 请求 Dify 获取优化建议
-		fullAnswer, err := difyClient.Request(ctx, payload)
+		fullAnswer, err := difyClient.Request(runCtx, payload)
 		if err != nil {
-			// 如果 Dify 请求失败，记录错误但不要中断流程
 			sugar.Errorw("failed to request Dify, proceeding with basic report", "error", err)
 		} else if len(fullAnswer) == 0 {
 			sugar.Warnw("Dify returned empty content, proceeding with basic report")
 		} else {
 			// 合并原始报告和优化建议
-			cleanedAnswer := dify.MergeOptimizationPrefix(fullAnswer)
-			finalReport = fmt.Sprintf("%s\n\n%s", summaryReport, cleanedAnswer)
+			finalReport = fmt.Sprintf("%s\n\n%s", summaryReport, dify.MergeOptimizationPrefix(fullAnswer))
 		}
 	}
 
-	// 处理企业微信消息发送
+	// 可选：企业微信推送（未配置时仅输出到日志）
 	if cfg.WechatWebhook != "" {
-		// 企业微信消息长度限制为4096字符，需要进行处理
-		wechatReport := finalReport
-		if len(wechatReport) > 4000 {
-			// 截断消息并添加提示
-			wechatReport = wechatReport[:3900] + "\n\n...\n\n⚠️ 报告内容过长，已截断。请查看完整报告获取详细信息。"
+		wechatReport := truncateUTF8(finalReport, wechatMessageLimit-len(wechatTruncatedSuffix))
+		if wechatReport != finalReport {
+			wechatReport += wechatTruncatedSuffix
 		}
 		wechatNotifier := report.NewNotifier(cfg.WechatWebhook)
 		stdLogger := log.New(os.Stdout, "", log.LstdFlags)
 		report.SendWecomReport(wechatNotifier.WechatNotifier(), wechatReport, stdLogger)
 	} else {
-		// 输出最终报告到控制台
-		sugar.Info("最终报告:\n", finalReport)
+		sugar.Infof("最终报告:\n%s", finalReport)
 	}
 
 	return nil
 }
 
-func main() {
-	// 创建根context
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
-
-	if err := run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+// truncateUTF8 按 UTF-8 字符边界截断字符串，最多保留 maxBytes 字节，
+// 避免按字节截断导致中文等多字节字符出现乱码。
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
 	}
+	end := 0
+	for end < len(s) {
+		_, size := utf8.DecodeRuneInString(s[end:])
+		if end+size > maxBytes {
+			break
+		}
+		end += size
+	}
+	return s[:end]
 }

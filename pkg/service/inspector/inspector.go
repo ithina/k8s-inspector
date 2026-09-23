@@ -1,11 +1,10 @@
-﻿// Package inspector implements the core Kubernetes cluster inspection logic:
+// Package inspector implements the core Kubernetes cluster inspection logic:
 // node health, pod lifecycle, component status, and resource metric collection.
 package inspector
 
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,10 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"k8s-inspector/pkg/api/prometheus"
-	"k8s-inspector/pkg/config"
-	"k8s-inspector/pkg/notify/wechat"
-	"k8s-inspector/pkg/types"
+	"github.com/ithina/k8s-inspector/pkg/api/prometheus"
+	"github.com/ithina/k8s-inspector/pkg/config"
+	"github.com/ithina/k8s-inspector/pkg/types"
 
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -38,20 +36,14 @@ var criticalComponents = []string{
 	"coredns",
 }
 
-// 定义需要过滤的命名空间集合
-var excludeNamespaces = map[string]struct{}{
-	"k8s":        {},
-	"csi-cephfs": {},
-}
-
 // 巡检服务
 type Inspector struct {
-	clientset      *kubernetes.Clientset
-	promClient     prometheus.PrometheusClient
-	config         *config.Config
-	logger         *zap.Logger
-	httpClient     *http.Client
-	wechatNotifier *wechat.Notifier
+	clientset  *kubernetes.Clientset
+	promClient prometheus.PrometheusClient
+	config     *config.Config
+	logger     *zap.Logger
+	// excludeNS 需要跳过 Pod 巡检的命名空间集合（来自 EXCLUDE_NAMESPACES 配置）
+	excludeNS map[string]struct{}
 }
 
 // 创建巡检服务实例
@@ -60,20 +52,33 @@ func NewInspector(cfg *config.Config, logger *zap.Logger) (*Inspector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("创建Kubernetes客户端失败: %w", err)
 	}
-	promClient, err := prometheus.NewPrometheusClientFromEnv()
-	if err != nil {
-		return nil, fmt.Errorf("创建Prometheus客户端失败: %w", err)
+
+	// Prometheus 为可选依赖：未配置时跳过指标采集，巡检降级运行
+	var promClient prometheus.PrometheusClient
+	if cfg.PrometheusURL != "" {
+		promClient, err = prometheus.NewPrometheusClient(cfg.PrometheusURL)
+		if err != nil {
+			return nil, fmt.Errorf("创建Prometheus客户端失败: %w", err)
+		}
+	} else {
+		logger.Warn("PROMETHEUS_URL 未配置，跳过指标采集，报告不包含资源使用率")
 	}
+
 	if err := os.MkdirAll(cfg.ReportOutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建报告目录失败: %w", err)
 	}
+
+	excludeNS := make(map[string]struct{}, len(cfg.ExcludeNamespaces))
+	for _, ns := range cfg.ExcludeNamespaces {
+		excludeNS[ns] = struct{}{}
+	}
+
 	return &Inspector{
-		clientset:      clientset,
-		promClient:     promClient,
-		config:         cfg,
-		logger:         logger,
-		httpClient:     &http.Client{Timeout: 15 * time.Second},
-		wechatNotifier: wechat.NewNotifier(cfg.WechatWebhook),
+		clientset:  clientset,
+		promClient: promClient,
+		config:     cfg,
+		logger:     logger,
+		excludeNS:  excludeNS,
 	}, nil
 }
 
@@ -133,22 +138,24 @@ func (i *Inspector) RunInspection(ctx context.Context) (*types.InspectionReport,
 	report.Metadata.Duration = time.Since(startTime).Round(time.Millisecond).String()
 	report.Findings = i.AnalyzeFindings(report)
 
-	// 使用传入的上下文创建带有超时的上下文
-	promCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
+	// 集群级资源使用率（Prometheus 未配置时跳过）
+	if i.promClient != nil {
+		promCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
 
-	cpuUsage, err := i.promClient.QueryClusterCPUUsage(promCtx)
-	if err != nil {
-		i.logger.Error("Failed to query cluster CPU usage", zap.Error(err))
-	} else {
-		report.Metadata.ClusterCPUUsage = cpuUsage
-	}
+		cpuUsage, err := i.promClient.QueryClusterCPUUsage(promCtx)
+		if err != nil {
+			i.logger.Error("Failed to query cluster CPU usage", zap.Error(err))
+		} else {
+			report.Metadata.ClusterCPUUsage = cpuUsage
+		}
 
-	memUsage, err := i.promClient.QueryClusterMemoryUsage(promCtx)
-	if err != nil {
-		i.logger.Error("Failed to query cluster memory usage", zap.Error(err))
-	} else {
-		report.Metadata.ClusterMemoryUsage = memUsage
+		memUsage, err := i.promClient.QueryClusterMemoryUsage(promCtx)
+		if err != nil {
+			i.logger.Error("Failed to query cluster memory usage", zap.Error(err))
+		} else {
+			report.Metadata.ClusterMemoryUsage = memUsage
+		}
 	}
 
 	return report, nil
@@ -214,8 +221,8 @@ func (i *Inspector) CheckPods(ctx context.Context) (types.PodStatistics, error) 
 	)
 
 	for _, ns := range namespaces.Items {
-		if _, skip := excludeNamespaces[ns.Name]; skip {
-			continue // 跳过需要过滤的命名空间
+		if _, skip := i.excludeNS[ns.Name]; skip {
+			continue // 跳过配置中排除的命名空间
 		}
 		wg.Add(1)
 		go func(namespace string) {
@@ -297,10 +304,18 @@ func (i *Inspector) CheckNodes(ctx context.Context) ([]types.NodeStatus, error) 
 	promCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// 只用 Prometheus 获取节点资源
-	promUsage, promErr := i.promClient.QueryNodeResourceUsage(promCtx)
-	if promErr != nil {
-		return nil, fmt.Errorf("prometheus 查询节点资源失败: %w", promErr)
+	// 节点资源指标依赖 Prometheus，未配置或查询失败时降级：
+	// 节点健康检查继续执行，仅缺少 CPU/内存/磁盘使用率数据
+	promUsage := make(map[string]prometheus.NodeResourceUsage)
+	if i.promClient != nil {
+		var promErr error
+		promUsage, promErr = i.promClient.QueryNodeResourceUsage(promCtx)
+		if promErr != nil {
+			i.logger.Warn("Prometheus 查询节点资源失败，跳过资源指标", zap.Error(promErr))
+			promUsage = make(map[string]prometheus.NodeResourceUsage)
+		}
+	} else {
+		i.logger.Warn("Prometheus 未配置，跳过节点资源指标采集")
 	}
 
 	// 获取所有运行中的Pod并按节点分组

@@ -1,11 +1,11 @@
-﻿# Binaries
+# Binaries
 /bin/
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-inspector
+/inspector
 
 # Test
 *.test
@@ -15,6 +15,7 @@ coverage.html
 # IDE
 .idea/
 .vscode/
+.qoder/
 *.swp
 *.swo
 *~

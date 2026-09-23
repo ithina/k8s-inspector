@@ -1,11 +1,10 @@
-﻿// Package prometheus provides a client for querying cluster and node-level
+// Package prometheus provides a client for querying cluster and node-level
 // resource metrics (CPU, memory, disk) from a Prometheus server.
 package prometheus
 
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -35,14 +34,15 @@ type prometheusClient struct {
 	api v1.API
 }
 
-func NewPrometheusClientFromEnv() (PrometheusClient, error) {
-	prometheusURL := os.Getenv("PROMETHEUS_URL")
-	if prometheusURL == "" {
-		return nil, fmt.Errorf("PROMETHEUS_URL environment variable not set")
+// NewPrometheusClient 根据地址创建 Prometheus 客户端。
+// 是否启用 Prometheus 由调用方根据配置决定。
+func NewPrometheusClient(address string) (PrometheusClient, error) {
+	if address == "" {
+		return nil, fmt.Errorf("prometheus address is empty")
 	}
 
 	client, err := api.NewClient(api.Config{
-		Address: prometheusURL,
+		Address: address,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("error creating prometheus client: %v", err)

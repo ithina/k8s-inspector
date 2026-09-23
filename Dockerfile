@@ -1,29 +1,40 @@
-﻿# ── 构建阶段 ──
-FROM harbor.xx/ic/golang:1.23.9 AS builder
+# ── 构建阶段 ──
+FROM golang:1.23.9 AS builder
+
 WORKDIR /app
+
+# GOPROXY 可通过构建参数覆盖（例如国内环境：--build-arg GOPROXY=https://goproxy.cn,direct）
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+
 COPY go.mod go.sum ./
-ENV GOPROXY=https://goproxy.cn,direct
 RUN go mod download
+
 COPY . .
-WORKDIR /app/cmd/inspector
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+
+# VERSION 通过构建参数注入二进制版本号（-ldflags），默认 dev
+ARG VERSION=dev
+# TARGETOS/TARGETARCH 在使用 buildx 构建多架构镜像时自动注入
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -trimpath \
-    -ldflags "-s -w -X main.version=$(git rev-parse --short HEAD 2>/dev/null || echo dev)" \
-    -o /app/inspector .
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /app/inspector ./cmd/inspector
 
 # ── 运行阶段 ──
-FROM harbor.xx/ic/alpine:3.19.7
+FROM alpine:3.19.7
 
 LABEL org.opencontainers.image.title="k8s-inspector" \
       org.opencontainers.image.description="Kubernetes cluster intelligent inspection tool" \
-      org.opencontainers.image.source="http://git.xx/k8s/k8s-inspector" \
+      org.opencontainers.image.source="https://github.com/ithina/k8s-inspector" \
       org.opencontainers.image.licenses="MIT"
 
 ENV TZ=Asia/Shanghai \
     APP_HOME=/app \
     KUBE_HOME=/home/vmuser/.kube
 
-RUN apk add --no-cache shadow curl tzdata ca-certificates && \
+RUN apk add --no-cache shadow tzdata ca-certificates && \
     ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone && \
     groupadd -r -g 700 vmuser && \
@@ -34,9 +45,10 @@ RUN apk add --no-cache shadow curl tzdata ca-certificates && \
 
 WORKDIR ${APP_HOME}
 
-COPY --from=builder --chown=vmuser:vmuser ${APP_HOME}/inspector ${APP_HOME}/
-COPY --from=builder --chown=vmuser:vmuser ${APP_HOME}/templates ${APP_HOME}/templates
+# HTML 报告模板已通过 embed 内置到二进制，无需额外拷贝模板文件
+COPY --from=builder --chown=vmuser:vmuser /app/inspector ${APP_HOME}/inspector
 
 USER vmuser
 
-ENTRYPOINT ["./inspector", "--once"]
+ENTRYPOINT ["./inspector"]
+CMD ["--once"]

@@ -261,9 +261,11 @@ func (p *StreamParser) Parse(body io.Reader) (string, error) {
 	return finalAnswer, nil
 }
 
-// 过滤AI分析过程内容
+// MergeOptimizationPrefix 清理 AI 流式输出中的过程噪音：
+// 删除 Markdown 引用行（对原始报告的复述），并压缩多余的连续空行。
+// 优化建议内容不做删除，在任何阶段均完整保留。
 func MergeOptimizationPrefix(content string) string {
-	content = optimizationRegex.ReplaceAllString(content, "")
+	content = quoteLineRegex.ReplaceAllString(content, "")
 	return newlineRegex.ReplaceAllString(content, "\n\n")
 }
 
@@ -293,23 +295,28 @@ func cleanConsecutiveNewlines(s string) string {
 	return regexp.MustCompile(`\n{3,}`).ReplaceAllString(s, "\n\n")
 }
 
-// 提取最后完整建议段落
+// 提取最后完整建议段落：
+// 片段以 "\n优化建议：" 或文本开头 "优化建议：" 起始，
+// 边界为句末标点（含后继空白）、连续两个换行或文本结尾。
 func extractLastCompleteSuggestion(content string) string {
-	r := regexp.MustCompile(`(?s)((?:\n优化建议：|^优化建议：).*?)(([.。！!]\\s*)|(\n{2,})|$)`)
+	r := regexp.MustCompile(`(?s)((?:\n优化建议：|^优化建议：).*?)(([.。！!]\s*)|(\n{2,})|$)`)
 	matches := r.FindAllStringSubmatch(content, -1)
 	if len(matches) == 0 {
 		return ""
 	}
 	lastMatch := matches[len(matches)-1][0]
 	return strings.TrimRightFunc(lastMatch, func(r rune) bool {
-		return r == '\n' || unicode.IsPunct(r)
+		return unicode.IsSpace(r) || unicode.IsPunct(r)
 	})
 }
 
 // 正则变量
 var (
-	optimizationRegex = regexp.MustCompile(`(?:\n*>.*?\\n)|(?:\\n+|^)优化建议：[^\\n]*[\\p{Han}\\w]`)
-	newlineRegex      = regexp.MustCompile(`\\n{3,}`)
+	// quoteLineRegex 匹配 Markdown 引用行（AI 输出中复述原始报告的过程内容），
+	// 连同行尾换行一并删除。
+	quoteLineRegex = regexp.MustCompile(`(?m)^>.*$\n?`)
+	// newlineRegex 将三个及以上连续换行压缩为两个。
+	newlineRegex = regexp.MustCompile(`\n{3,}`)
 )
 
 // 支持点分隔符获取嵌套字段

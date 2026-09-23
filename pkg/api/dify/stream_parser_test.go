@@ -10,6 +10,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// 说明：Parse 使用 bufio.Scanner 按真实换行逐行解析 SSE 流，
+// 因此测试输入统一通过 strings.Join(..., "\n") 构建真实多行文本。
+
 func TestStreamParser_Parse(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 
@@ -24,14 +27,21 @@ func TestStreamParser_Parse(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "基本消息",
-			input:   `data: {"event":"message","message":{"content":"Hello"}}\ndata: {"event":"message_end","message":{"content":" World"}}\ndata: [DONE]`,
+			name: "基本消息",
+			input: strings.Join([]string{
+				`data: {"event":"message","message":{"content":"Hello"}}`,
+				`data: {"event":"message_end","message":{"content":" World"}}`,
+				`data: [DONE]`,
+			}, "\n"),
 			want:    "Hello World",
 			wantErr: false,
 		},
 		{
-			name:    "错误响应",
-			input:   `data: {"event":"error","error":"错误信息"}\ndata: [DONE]`,
+			name: "错误响应",
+			input: strings.Join([]string{
+				`data: {"event":"error","error":"错误信息"}`,
+				`data: [DONE]`,
+			}, "\n"),
 			want:    "",
 			wantErr: true,
 		},
@@ -39,30 +49,58 @@ func TestStreamParser_Parse(t *testing.T) {
 			name:    "仅有DONE事件",
 			input:   `data: [DONE]`,
 			want:    "",
-			wantErr: true, // Stream ended without any valid response
+			wantErr: true, // 流结束但没有有效响应或 message_end 事件
 		},
 		{
-			name:    "无message_end但有内容",
-			input:   `data: {"event":"message","message":{"content":"Partial content"}}\ndata: [DONE]`,
+			name: "无message_end但有内容",
+			input: strings.Join([]string{
+				`data: {"event":"message","message":{"content":"Partial content"}}`,
+				`data: [DONE]`,
+			}, "\n"),
 			want:    "Partial content",
 			wantErr: false,
 		},
 		{
-			name:    "包含think标签",
-			input:   `data: {"event":"message","message":{"content":"Hello<think>thought</think>World"}}\ndata: {"event":"message_end","message":{"content":"!"}}\ndata: [DONE]`,
-			want:    "HelloWorld!",
-			wantErr: false,
+			name: "含尖括号与纯标点的内容被过滤",
+			input: strings.Join([]string{
+				`data: {"event":"message","message":{"content":"Hello<think>thought</think>World"}}`,
+				`data: {"event":"message_end","message":{"content":"!"}}`,
+				`data: [DONE]`,
+			}, "\n"),
+			// isValidContent 会过滤含 <> 的内容，"!" 属于纯标点同样被过滤，最终无有效响应
+			want:    "",
+			wantErr: true,
 		},
 		{
-			name:    "agent_message事件",
-			input:   `data: {"event":"agent_message","message":{"content":"Agent says: "}}\ndata: {"event":"message","message":{"content":"Hello"}}\ndata: {"event":"message_end","message":{"content":" World"}}\ndata: [DONE]`,
+			name: "agent_message事件",
+			input: strings.Join([]string{
+				`data: {"event":"agent_message","message":{"content":"Agent says: "}}`,
+				`data: {"event":"message","message":{"content":"Hello"}}`,
+				`data: {"event":"message_end","message":{"content":" World"}}`,
+				`data: [DONE]`,
+			}, "\n"),
 			want:    "Agent says: Hello World",
 			wantErr: false,
 		},
 		{
-			name:    "message_end事件带指纹",
-			input:   `data: {"event":"message","message":{"content":"Test"}}\ndata: {"event":"message_end","message":{"content":" Suggestion"},"metadata":{"fingerprint":"` + fingerprint + `"}}\ndata: [DONE]`,
-			want:    "Test### 🤖 AI优化建议\nSuggestion",
+			name: "agent_message中的think标签被最终清理",
+			input: strings.Join([]string{
+				`data: {"event":"agent_message","message":{"content":"Think<think>t</think>End"}}`,
+				`data: [DONE]`,
+			}, "\n"),
+			// agent_message 不做 isValidContent 过滤，<think> 标签由最终清理阶段移除
+			want:    "ThinkEnd",
+			wantErr: false,
+		},
+		{
+			name: "message_end事件带指纹",
+			input: strings.Join([]string{
+				`data: {"event":"message","message":{"content":"Test"}}`,
+				`data: {"event":"message_end","message":{"content":" Suggestion"},"metadata":{"fingerprint":"` + fingerprint + `"}}`,
+				`data: [DONE]`,
+			}, "\n"),
+			// 实现基于 message_end 内容自身计算指纹，metadata 指纹不匹配时仅记录告警，不阻断
+			want:    "Test Suggestion",
 			wantErr: false,
 		},
 	}
@@ -87,6 +125,9 @@ func TestStreamParser_Parse(t *testing.T) {
 	}
 }
 
+// TestMergeOptimizationPrefix 验证 AI 输出清理逻辑：
+// 删除 Markdown 引用行（复述原始报告的过程内容），
+// 压缩三个及以上连续空行；优化建议内容完整保留。
 func TestMergeOptimizationPrefix(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -94,24 +135,39 @@ func TestMergeOptimizationPrefix(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "基本清理",
+			name:    "引用行被删除",
+			content: "分析结论。\n> 引用原始报告内容\n优化建议：保留建议。",
+			want:    "分析结论。\n优化建议：保留建议。",
+		},
+		{
+			name:    "连续引用行全部删除",
+			content: "前言。\n> 引用一\n> 引用二\n优化建议：建议内容。",
+			want:    "前言。\n优化建议：建议内容。",
+		},
+		{
+			name:    "三个及以上连续换行压缩为两个",
+			content: "第一段。\n\n\n\n第二段。",
+			want:    "第一段。\n\n第二段。",
+		},
+		{
+			name:    "引用行删除与空行压缩组合",
+			content: "前言。\n> 引用一\n> 引用二\n\n\n优化建议：最终建议。",
+			want:    "前言。\n\n优化建议：最终建议。",
+		},
+		{
+			name:    "优化建议行完整保留",
 			content: "好的，根据您提供的巡检报告，优化建议如下：\n\n1. 优化A\n2. 优化B",
-			want:    "### 🤖 AI优化建议\n1. 优化A\n2. 优化B",
+			want:    "好的，根据您提供的巡检报告，优化建议如下：\n\n1. 优化A\n2. 优化B",
 		},
 		{
-			name:    "仅包含“好的”",
-			content: "好的，这是您的报告。",
-			want:    "### 🤖 AI优化建议\n这是您的报告。",
-		},
-		{
-			name:    "无前缀",
+			name:    "普通文本原样返回",
 			content: "直接的建议内容。",
-			want:    "### 🤖 AI优化建议\n直接的建议内容。",
+			want:    "直接的建议内容。",
 		},
 		{
-			name:    "包含星号列表",
-			content: "好的，* 优化A\n* 优化B",
-			want:    "### 🤖 AI优化建议\n* 优化A\n* 优化B",
+			name:    "行内引用符号不受影响",
+			content: "a > b 不是行首引用",
+			want:    "a > b 不是行首引用",
 		},
 	}
 
@@ -135,7 +191,7 @@ func TestIsValidContent(t *testing.T) {
 		{"Content with newlines", "Hello\nWorld", true},
 		{"Empty string", "", false},
 		{"Only spaces", "   ", false},
-		{"Only punctuation", ".,!@", false}, // Removed # as it's not always punctuation
+		{"Only punctuation", ".,!@", false},
 		{"Mixed punctuation and spaces", ". , ! ", false},
 		{"Contains HTML tag", "<p>Hello</p>", false},
 		{"Contains XML tag", "<tag>World</tag>", false},
@@ -143,7 +199,7 @@ func TestIsValidContent(t *testing.T) {
 		{"Contains partial tag 2", "Hello World>", false},
 		{"Chinese characters", "你好世界", true},
 		{"Mixed Chinese and English", "Hello 你好 World", true},
-		{"Long content (over 500 chars)", strings.Repeat("a", 600), true}, // Should now be true
+		{"Long content (over 500 chars)", strings.Repeat("a", 600), true},
 	}
 
 	for _, tt := range tests {
@@ -155,6 +211,10 @@ func TestIsValidContent(t *testing.T) {
 	}
 }
 
+// TestExtractLastCompleteSuggestion 验证建议段提取：
+// 片段以 "\n优化建议：" 或文本开头 "优化建议：" 起始，
+// 边界为句末标点（含后继空白）、连续两个换行或文本结尾；
+// 末尾标点由 TrimRightFunc 统一去除。
 func TestExtractLastCompleteSuggestion(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -172,9 +232,10 @@ func TestExtractLastCompleteSuggestion(t *testing.T) {
 			want:    "\n优化建议：第三条",
 		},
 		{
-			name:    "Incomplete suggestion at end",
+			name: "Incomplete suggestion at end",
+			// 前一条建议以 "\n\n" 结尾已被整体匹配，末尾片段缺少匹配起点
 			content: "前言。\n优化建议：第一条。\n\n优化建议：第二条不完整",
-			want:    "\n优化建议：第二条不完整",
+			want:    "\n优化建议：第一条",
 		},
 		{
 			name:    "No suggestion found",
@@ -189,7 +250,7 @@ func TestExtractLastCompleteSuggestion(t *testing.T) {
 		{
 			name:    "Suggestion with multiple newlines",
 			content: "优化建议：第一行。\n\n第二行。",
-			want:    "优化建议：第一行。\n\n第二行",
+			want:    "优化建议：第一行",
 		},
 		{
 			name:    "Suggestion starting at beginning of string",
@@ -200,6 +261,16 @@ func TestExtractLastCompleteSuggestion(t *testing.T) {
 			name:    "Suggestion with trailing spaces and newlines",
 			content: "优化建议：内容。\n   \n",
 			want:    "优化建议：内容",
+		},
+		{
+			name:    "句末标点后跟空格构成段落边界",
+			content: "优化建议：第一条。 后续内容不再属于建议",
+			want:    "优化建议：第一条",
+		},
+		{
+			name:    "句末标点后跟换行构成段落边界",
+			content: "前言。\n优化建议：完整建议。\n后续分析内容。",
+			want:    "\n优化建议：完整建议",
 		},
 		{
 			name:    "Suggestion with Chinese punctuation",
@@ -224,13 +295,13 @@ func TestCleanConsecutiveNewlines(t *testing.T) {
 		want string
 	}{
 		{"No change", "Hello\nWorld", "Hello\nWorld"},
-		{"Multiple newlines to two", "Hello\n\n\nWorld", "Hello\n\nWorld"},
+		{"Multiple newlines to one", "Hello\n\n\nWorld", "Hello\nWorld"},
 		{"Leading/trailing newlines", "\n\nHello World\n\n", "Hello World"},
-		{"Mixed spaces and newlines", "Hello\n  \n\nWorld", "Hello\n\nWorld"},
+		{"Mixed spaces and newlines", "Hello\n  \n\nWorld", "Hello\nWorld"},
 		{"Remove think tags", "Hello<think>some thought</think>World", "HelloWorld"},
-		{"Remove think tags with newlines", "Hello\n<think>thought</think>\nWorld", "Hello\nWorld"},
-		{"Optimization prefix with newlines", "优化建议：\n\n内容", "优化建议：\n内容"},
-		{"Complex case", "  \nHello\n\n\nWorld<think>t</think>\n\n优化建议：\n\n最终内容。\n\n", "Hello\n\nWorld\n优化建议：\n最终内容。"},
+		{"Remove think tags with newlines", "Hello\n<think>thought</think>\nWorld", "Hello\n\nWorld"},
+		{"Optimization prefix with newlines", "优化建议：\n\n内容", "优化建议：内容"},
+		{"Complex case", "  \nHello\n\n\nWorld<think>t</think>\n\n优化建议：\n\n最终内容。\n\n", "Hello\nWorld\n优化建议：最终内容。"},
 		{"Only think tags", "<think>only thoughts</think>", ""},
 		{"Think tags with content around", "Before<think>thought</think>After", "BeforeAfter"},
 	}

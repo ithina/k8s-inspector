@@ -1,4 +1,4 @@
-﻿<div align="center">
+<div align="center">
 
 # K8s Inspector
 
@@ -6,6 +6,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-Compatible-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
+[![CI](https://github.com/ithina/k8s-inspector/actions/workflows/ci.yml/badge.svg)](https://github.com/ithina/k8s-inspector/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 自动化 Kubernetes 集群巡检工具，集成 Prometheus 指标采集、Dify AI 智能分析和企业微信通知，提供集群健康度全景报告。
@@ -115,16 +116,22 @@ Config   ─┘
 git clone https://github.com/ithina/k8s-inspector.git
 cd k8s-inspector
 
-# 设置环境变量
+# 设置环境变量（可选模块未配置时自动降级运行）
 export CLUSTER_NAME="kubernetes"
 export REPORT_CLUSTER_NAME="K8s测试集群"
-export PROMETHEUS_URL="http://prometheus-k8s-monitoring-apps-sit.xx"
+export PROMETHEUS_URL="http://prometheus.monitoring.svc:9090"
 export DIFY_API_KEY="app-xxx"
-export DIFY_BASE_URL="http://k8s-dify-uat.xx/v1/chat-messages"
+export DIFY_BASE_URL="https://your-dify-host/v1/chat-messages"
 export WECHAT_WEBHOOK="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
 
-# 运行巡检
-go run ./cmd/inspector/main.go
+# 单次巡检后退出（默认用于 CronJob）
+go run ./cmd/inspector --once
+
+# 循环巡检：每 2 小时执行一次，Ctrl+C / SIGTERM 优雅退出
+go run ./cmd/inspector --interval 2h
+
+# 查看版本（构建时可通过 -ldflags 注入）
+go run ./cmd/inspector --version
 ```
 
 ### Docker 运行
@@ -154,6 +161,7 @@ docker run --rm \
 | `CRITICAL_THRESHOLD` | 否 | `90` | 严重告警阈值（%） |
 | `WARNING_THRESHOLD` | 否 | `80` | 警告阈值（%） |
 | `DIFY_TIMEOUT` | 否 | `60s` | AI 分析超时（10s-300s） |
+| `EXCLUDE_NAMESPACES` | 否 | 空 | 跳过 Pod 巡检的命名空间，逗号分隔（如 `kube-public,csi-cephfs`） |
 
 ### 可选集成
 
@@ -162,6 +170,7 @@ docker run --rm \
 | `PROMETHEUS_URL` | 跳过指标采集 | Prometheus 查询地址 |
 | `DIFY_API_KEY` + `DIFY_BASE_URL` | 生成基础报告 | Dify AI 服务配置 |
 | `WECHAT_WEBHOOK` | 输出到控制台 | 企业微信机器人地址 |
+| `REPORT_BASE_URL` | 通知中不含报告链接 | 报告访问地址前缀，用于生成完整报告链接 |
 
 > 未配置可选模块时，系统自动降级运行，不报错。
 
@@ -173,23 +182,29 @@ docker run --rm \
 kubectl apply -f deploy/kubernetes/cronjob.yaml
 ```
 
-默认每天 09:30 和 18:30 执行巡检，通过 K8s Secret 注入敏感配置：
+清单包含 Namespace、ServiceAccount、最小权限 RBAC（只读 nodes/pods/namespaces）、PVC 与 CronJob，
+默认每天 09:30 和 18:30 执行巡检；如需常驻循环巡检，可将 `args` 改为 `["--interval", "1h"]` 并以 Deployment 方式运行。
+
+敏感配置通过 Secret 注入（可不创建，未配置的模块自动降级运行）：
 
 ```bash
-kubectl create secret generic dify-key \
-  --from-literal=api_key='app-xxx' -n k8s
-
-kubectl create secret generic dify-url \
-  --from-literal=base_url='http://k8s-dify-uat.xx/v1/chat-messages' -n k8s
+kubectl -n k8s-inspector create secret generic k8s-inspector-secrets \
+  --from-literal=wechat-webhook='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx' \
+  --from-literal=dify-api-key='app-xxx' \
+  --from-literal=dify-base-url='https://your-dify-host/v1/chat-messages'
 ```
+
+> 部署前请先推送镜像（默认 `ghcr.io/ithina/k8s-inspector:latest`），或在 CronJob 清单中替换为自有镜像地址。
 
 ### 命名空间过滤
 
-系统默认跳过以下命名空间的 Pod 巡检：
-- `k8s`（巡检工具自身命名空间）
-- `csi-cephfs`（存储插件命名空间）
+通过 `EXCLUDE_NAMESPACES` 环境变量配置需跳过 Pod 巡检的命名空间（逗号分隔，默认为空）。
+CronJob 清单中已默认排除巡检工具自身命名空间：
 
-如需调整，修改 [inspector.go](pkg/service/inspector/inspector.go) 中的 `excludeNamespaces`。
+```yaml
+- name: EXCLUDE_NAMESPACES
+  value: "k8s-inspector"
+```
 
 ## 开发指南
 
@@ -197,10 +212,12 @@ kubectl create secret generic dify-url \
 
 ```
 k8s-inspector/
+├── .github/               # CI 与开源协作配置
 ├── cmd/
-│   └── inspector/         # 主程序入口
+│   ├── inspector/         # 主程序入口
+│   └── full-test/         # 报告生成的本地调试入口
 ├── deploy/
-│   └── kubernetes/        # K8s 部署清单
+│   └── kubernetes/        # K8s 部署清单（Namespace/RBAC/PVC/CronJob）
 ├── docs/
 │   └── ARCHITECTURE.md    # 架构文档
 ├── pkg/
@@ -214,8 +231,9 @@ k8s-inspector/
 │   │   ├── inspector/     # 巡检核心逻辑
 │   │   └── report/        # 报告生成与发送
 │   └── types/             # 共享数据模型
-├── templates/
-│   └── report.html        # HTML 报告模板
+├── templates/             # HTML 报告模板（go:embed 内置）
+│   ├── embed.go
+│   └── report.html
 ├── Dockerfile             # 多阶段容器构建
 ├── go.mod
 └── go.sum
@@ -227,15 +245,15 @@ k8s-inspector/
 # 依赖下载
 go mod download
 
-# 构建
-go build -o bin/inspector ./cmd/inspector
+# 构建（可通过 -ldflags 注入版本号）
+go build -ldflags "-X main.version=dev" -o bin/inspector ./cmd/inspector
 
-# 测试
+# 测试（CI 中使用 -race）
 go test ./...
 
-# 代码检查
+# 代码格式与静态检查
+gofmt -l .
 go vet ./...
-go fmt ./...
 ```
 
 ### 测试报告生成

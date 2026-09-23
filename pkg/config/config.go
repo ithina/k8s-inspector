@@ -1,4 +1,4 @@
-﻿// Package config manages environment-based configuration with validation and defaults.
+// Package config manages environment-based configuration with validation and defaults.
 //
 // Configuration is loaded from environment variables, validated against
 // business rules (threshold ranges, concurrency limits), and populated
@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -21,12 +22,15 @@ const (
 	EnvReportClusterName = "REPORT_CLUSTER_NAME"
 	EnvWechatWebhook     = "WECHAT_WEBHOOK"
 	EnvReportOutputDir   = "REPORT_OUTPUT_DIR"
+	EnvReportBaseURL     = "REPORT_BASE_URL"
 	EnvDifyBaseURL       = "DIFY_BASE_URL"
 	EnvDifyAPIKey        = "DIFY_API_KEY"
 	EnvDifyTimeout       = "DIFY_TIMEOUT"
 	EnvCriticalThreshold = "CRITICAL_THRESHOLD"
 	EnvWarningThreshold  = "WARNING_THRESHOLD"
 	EnvMaxConcurrency    = "MAX_CONCURRENCY"
+	EnvPrometheusURL     = "PROMETHEUS_URL"
+	EnvExcludeNamespaces = "EXCLUDE_NAMESPACES"
 
 	// 默认值
 	DefaultTimeout           = 60 * time.Second
@@ -46,17 +50,19 @@ const (
 
 // 配置相关
 type Config struct {
-	ClusterName         string        `json:"clusterName"`
-	ReportClusterName   string        `json:"reportClusterName"`
-	WechatWebhook       string        `json:"wechatWebhook"`
-	CriticalThreshold   int           `json:"criticalThreshold"`
-	WarningThreshold    int           `json:"warningThreshold"`
-	InspectionNamespace string        `json:"inspectionNamespace"`
-	MaxConcurrency      int           `json:"maxConcurrency"`
-	ReportOutputDir     string        `json:"reportOutputDir"`
-	DifyBaseURL         string        `json:"difyBaseUrl"`
-	DifyAPIKey          string        `json:"difyApiKey"`
-	Timeout             time.Duration `json:"timeout"`
+	ClusterName       string        `json:"clusterName"`
+	ReportClusterName string        `json:"reportClusterName"`
+	WechatWebhook     string        `json:"wechatWebhook"`
+	PrometheusURL     string        `json:"prometheusUrl"`
+	ReportBaseURL     string        `json:"reportBaseUrl"`
+	ExcludeNamespaces []string      `json:"excludeNamespaces"`
+	CriticalThreshold int           `json:"criticalThreshold"`
+	WarningThreshold  int           `json:"warningThreshold"`
+	MaxConcurrency    int           `json:"maxConcurrency"`
+	ReportOutputDir   string        `json:"reportOutputDir"`
+	DifyBaseURL       string        `json:"difyBaseUrl"`
+	DifyAPIKey        string        `json:"difyApiKey"`
+	Timeout           time.Duration `json:"timeout"`
 }
 
 // 验证配置的必要字段
@@ -80,6 +86,20 @@ func (c *Config) Validate() error {
 	if c.WechatWebhook != "" {
 		if _, err := url.Parse(c.WechatWebhook); err != nil {
 			return errors.Wrap(err, "invalid wechatWebhook URL")
+		}
+	}
+
+	// 验证 Prometheus 配置（可选，未配置时跳过指标采集）
+	if c.PrometheusURL != "" {
+		if _, err := url.Parse(c.PrometheusURL); err != nil {
+			return errors.Wrap(err, "invalid prometheusURL")
+		}
+	}
+
+	// 验证报告外链地址（可选，未配置时通知中不生成报告链接）
+	if c.ReportBaseURL != "" {
+		if _, err := url.Parse(c.ReportBaseURL); err != nil {
+			return errors.Wrap(err, "invalid reportBaseURL")
 		}
 	}
 
@@ -149,12 +169,27 @@ func getEnvInt(key string, defaultValue int) int {
 	return defaultValue
 }
 
+// parseStringList 将逗号分隔的环境变量解析为字符串列表，
+// 自动去除空白项，空值返回 nil。
+func parseStringList(value string) []string {
+	var result []string
+	for _, item := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
 // 从环境变量加载配置
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
 		ClusterName:       os.Getenv(EnvClusterName),
 		ReportClusterName: os.Getenv(EnvReportClusterName),
 		WechatWebhook:     os.Getenv(EnvWechatWebhook),
+		PrometheusURL:     os.Getenv(EnvPrometheusURL),
+		ReportBaseURL:     os.Getenv(EnvReportBaseURL),
+		ExcludeNamespaces: parseStringList(os.Getenv(EnvExcludeNamespaces)),
 		ReportOutputDir:   os.Getenv(EnvReportOutputDir),
 		DifyBaseURL:       os.Getenv(EnvDifyBaseURL),
 		DifyAPIKey:        os.Getenv(EnvDifyAPIKey),

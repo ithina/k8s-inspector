@@ -38,9 +38,9 @@
 - 并发控制和错误处理
 
 ### 3.3 报告服务 (pkg/service/report)
-- HTML 报告生成
+- HTML 报告生成（go:embed 内置模板）
 - 企业微信通知
-- 自定义模板支持
+- 容量优化指标分析
 - 报告数据聚合
 
 ### 3.4 API 集成
@@ -94,8 +94,10 @@ graph TD
 
 ```
 k8s-inspector/
+├── .github/               # CI 与开源协作配置
 ├── cmd/                   # 主程序入口
-│   └── inspector/         # 主应用程序
+│   ├── inspector/         # 主应用程序
+│   └── full-test/         # 报告生成的本地调试入口
 ├── deploy/                # 部署配置
 │   ├── kubernetes/        # K8s 部署文件
 ├── docs/                  # 项目文档
@@ -110,8 +112,9 @@ k8s-inspector/
 │   │   └── report/        # 报告服务
 │   ├── types/             # 共享类型定义
 │   ├── config/            # 配置管理
-├── templates/             # 模板文件
-│   └── report/            # 报告模板
+├── templates/             # 报告模板（go:embed 内置）
+│   ├── embed.go
+│   └── report.html
 ├── Dockerfile             # 容器构建文件
 ├── go.mod                 # Go 模块定义
 ├── go.sum                 # Go 依赖校验

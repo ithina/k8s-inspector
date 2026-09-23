@@ -1,4 +1,4 @@
-﻿// Package types defines shared data models for inspection reports,
+// Package types defines shared data models for inspection reports,
 // node status, pod statistics, and component health.
 package types
 

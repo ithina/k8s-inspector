@@ -1,0 +1,21 @@
+# 版本控制与 CI
+.git
+.github
+
+# IDE
+.idea
+.vscode
+
+# 构建产物与本地报告
+bin/
+reports/
+coverage.out
+
+# 文档与部署清单（不参与镜像构建）
+docs/
+deploy/
+*.md
+
+# 本地环境
+.DS_Store
+Thumbs.db

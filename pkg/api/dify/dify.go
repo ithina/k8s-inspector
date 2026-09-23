@@ -1,4 +1,4 @@
-﻿// Package dify implements a streaming client for the Dify AI API,
+// Package dify implements a streaming client for the Dify AI API,
 // supporting SSE-based response parsing and optimization suggestion extraction.
 package dify
 
@@ -93,24 +93,22 @@ func (c *Client) Request(ctx context.Context, payload map[string]interface{}) (s
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		defer resp.Body.Close()
-
 		// 检查响应状态码
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
 			lastErr = fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		// 创建流式解析器
+		// 解析流式响应，解析完成后立即释放资源（避免重试循环中延迟关闭）
 		parser := NewStreamParser(c.logger)
-		defer parser.Release()
-
-		// 解析响应
-		answer, err := parser.Parse(resp.Body)
-		if err != nil {
-			lastErr = fmt.Errorf("failed to parse response: %w", err)
+		answer, parseErr := parser.Parse(resp.Body)
+		resp.Body.Close()
+		parser.Release()
+		if parseErr != nil {
+			lastErr = fmt.Errorf("failed to parse response: %w", parseErr)
 			time.Sleep(2 * time.Second)
 			continue
 		}

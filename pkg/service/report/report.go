@@ -1,4 +1,4 @@
-﻿// Package report generates HTML inspection reports and builds
+// Package report generates HTML inspection reports and builds
 // enterprise WeChat notification messages from inspection data.
 package report
 
@@ -12,9 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"k8s-inspector/pkg/config"
-	"k8s-inspector/pkg/notify/wechat"
-	"k8s-inspector/pkg/types"
+	"github.com/ithina/k8s-inspector/pkg/config"
+	"github.com/ithina/k8s-inspector/pkg/notify/wechat"
+	"github.com/ithina/k8s-inspector/pkg/types"
+	"github.com/ithina/k8s-inspector/templates"
 )
 
 // 模板函数映射
@@ -63,6 +64,15 @@ const (
 	ReportFileNameTemplate = "%s-%s.html"
 )
 
+// 容量优化指标阈值（内存使用率百分比 / 节点 Pod 数量），可按容量规划调整
+const (
+	capacityHighMemoryThreshold = 80 // 高内存节点：内存使用率高于该值（%）
+	capacityLowMemoryThreshold  = 30 // 低内存节点：内存使用率低于该值（%）
+	capacityHighPodThreshold    = 50 // 高密度节点：Pod 数量高于该值
+	capacityLowPodThreshold     = 20 // 低密度节点：Pod 数量低于该值
+	capacityMaxDisplayNodes     = 5  // 通知消息中每类最多展示的节点数
+)
+
 // 报告通知器
 type Notifier struct {
 	wechatNotifier *wechat.Notifier
@@ -91,20 +101,12 @@ func normalizeThresholds(config *config.Config) {
 }
 
 // 生成巡检报告
+//
+// HTML 模板通过 embed 内置于二进制，渲染结果写入 config.ReportOutputDir，
+// 完整路径通过 logger 输出。
 func GenerateReport(report *types.InspectionReport, config *config.Config, logger io.Writer) error {
-	// 直接使用fmt.Println输出日志，确保日志可见
-	fmt.Println("\n========================================")
-	fmt.Println("          HTML报告生成过程")
-	fmt.Println("========================================")
-	currentDir, err := getCurrentDir()
-	if err != nil {
-		fmt.Printf("当前工作目录: 无法获取\n")
-	} else {
-		fmt.Printf("当前工作目录: %s\n", currentDir)
-	}
-	fmt.Printf("报告输出目录配置: %s\n", config.ReportOutputDir)
-
 	normalizeThresholds(config)
+
 	now := time.Now()
 	report.Metadata.GeneratedAt = now.Format("2006-01-02 15:04:05")
 	report.Metadata.ReportFile = fmt.Sprintf(
@@ -113,140 +115,36 @@ func GenerateReport(report *types.InspectionReport, config *config.Config, logge
 		now.Format("20060102-150405"),
 	)
 
-	// 处理报告输出目录，确保在不同操作系统下都能正确工作
-	reportOutputDir := config.ReportOutputDir
-
-	// 在Windows环境下，将Linux风格的路径转换为Windows风格的路径
-	// 但保持/app/reports的目录结构
-	if os.PathSeparator == '\\' {
-		// 如果是Windows系统，将/app/reports转换为当前驱动器下的app\reports目录
-		// 例如：D:\app\reports
-		currentDrive, err := os.Getwd()
-		if err == nil && len(currentDrive) > 1 && currentDrive[1] == ':' {
-			// 获取当前驱动器
-			reportOutputDir = currentDrive[:2] + "\\app\\reports"
-		} else {
-			// 如果无法获取当前驱动器，使用默认驱动器
-			reportOutputDir = "C:\\app\\reports"
-		}
-	}
-
-	// 获取报告输出目录的绝对路径
-	reportOutputDir, err = filepath.Abs(reportOutputDir)
+	reportOutputDir, err := filepath.Abs(config.ReportOutputDir)
 	if err != nil {
-		fmt.Printf("无法获取报告输出目录的绝对路径: %v\n", err)
+		return fmt.Errorf("无法解析报告输出目录: %w", err)
 	}
-
 	reportPath := filepath.Join(reportOutputDir, report.Metadata.ReportFile)
 
-	// 获取报告文件的绝对路径
-	reportAbsolutePath, err := filepath.Abs(reportPath)
+	tmpl, err := template.New("report.html").Funcs(templateFuncs).ParseFS(templates.FS, "report.html")
 	if err != nil {
-		fmt.Printf("无法获取报告文件的绝对路径: %v\n", err)
-		reportAbsolutePath = reportPath
+		return fmt.Errorf("解析内置报告模板失败: %w", err)
 	}
 
-	// 输出报告路径，使用绝对路径
-	fmt.Printf("\n📄 报告文件信息:")
-	fmt.Printf("\n   - 文件名: %s", report.Metadata.ReportFile)
-	fmt.Printf("\n   - 相对路径: %s", reportPath)
-	fmt.Printf("\n   - 绝对路径: %s\n", reportAbsolutePath)
-
-	data := reportTemplateData{Report: report, Config: config}
-
-	// 加载外部模板文件
-	fmt.Println("\n📁 加载HTML模板...")
-
-	// 尝试多种路径查找模板文件
-	var templatePath string
-	possiblePaths := []string{
-		filepath.Join("templates", "report.html"),
-		filepath.Join("../..", "templates", "report.html"),
-		filepath.Join("../../..", "templates", "report.html"),
-		filepath.Join("../../../..", "templates", "report.html"),
-	}
-
-	// 检查是否存在当前目录的绝对路径
-	if execPath, err := os.Executable(); err == nil {
-		execDir := filepath.Dir(execPath)
-		possiblePaths = append(possiblePaths, filepath.Join(execDir, "templates", "report.html"))
-		possiblePaths = append(possiblePaths, filepath.Join(execDir, "..", "templates", "report.html"))
-		possiblePaths = append(possiblePaths, filepath.Join(execDir, "../..", "templates", "report.html"))
-	}
-
-	// 添加项目根目录的可能路径
-	if currentDir, err := getCurrentDir(); err == nil {
-		possiblePaths = append(possiblePaths, filepath.Join(currentDir, "templates", "report.html"))
-		possiblePaths = append(possiblePaths, filepath.Join(currentDir, "..", "templates", "report.html"))
-	}
-
-	// 查找存在的模板文件
-	var found bool
-	for _, path := range possiblePaths {
-		if _, err := os.Stat(path); err == nil {
-			templatePath = path
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		fmt.Printf("❌ 未找到模板文件，尝试路径: %v\n", possiblePaths)
-		return fmt.Errorf("未找到模板文件: report.html")
-	}
-
-	// 获取模板文件的绝对路径
-	templateAbsolutePath, err := filepath.Abs(templatePath)
-	if err != nil {
-		templateAbsolutePath = templatePath
-	}
-
-	fmt.Printf("✅ 找到模板文件: %s\n", templateAbsolutePath)
-	tmpl, err := template.New("report.html").Funcs(templateFuncs).ParseFiles(templatePath)
-	if err != nil {
-		fmt.Printf("❌ 模板解析失败: %v\n", err)
-		return fmt.Errorf("模板解析失败: %w", err)
-	}
-
-	// 创建报告目录
-	fmt.Println("\n📂 创建报告目录...")
 	if err := os.MkdirAll(reportOutputDir, 0755); err != nil {
-		fmt.Printf("❌ 创建报告目录失败: %v\n", err)
 		return fmt.Errorf("创建报告目录失败: %w", err)
 	}
-	fmt.Printf("✅ 报告目录已创建或存在: %s\n", reportOutputDir)
 
-	// 创建报告文件
-	fmt.Println("\n📝 创建报告文件...")
 	file, err := os.Create(reportPath)
 	if err != nil {
-		fmt.Printf("❌ 创建报告文件失败: %v\n", err)
 		return fmt.Errorf("创建报告文件失败: %w", err)
 	}
 	defer file.Close()
-	fmt.Printf("✅ 报告文件已创建: %s\n", reportPath)
 
-	// 使用模板文件名渲染
-	fmt.Println("\n🎨 渲染HTML报告...")
+	data := reportTemplateData{Report: report, Config: config}
 	if err := tmpl.ExecuteTemplate(file, "report.html", data); err != nil {
-		fmt.Printf("❌ 模板渲染失败: %v\n", err)
 		return fmt.Errorf("模板渲染失败: %w", err)
 	}
 
-	fmt.Println("\n========================================")
-	fmt.Println("          HTML报告生成完成")
-	fmt.Println("========================================")
-	fmt.Printf("✅ 报告已成功生成！\n")
-	fmt.Printf("📁 报告目录: %s\n", reportOutputDir)
-	fmt.Printf("📄 报告文件: %s\n", report.Metadata.ReportFile)
-	fmt.Printf("🔗 完整路径: %s\n", reportAbsolutePath)
-	fmt.Println("========================================")
+	if logger != nil {
+		fmt.Fprintf(logger, "HTML 报告已生成: %s\n", reportPath)
+	}
 	return nil
-}
-
-// 获取当前工作目录
-func getCurrentDir() (string, error) {
-	return os.Getwd()
 }
 
 // 统计健康组件数量
@@ -258,6 +156,87 @@ func countHealthyComponents(components []types.ComponentStatus) int {
 		}
 	}
 	return count
+}
+
+// BuildCapacitySummary 构建集群容量优化指标摘要（企业微信 Markdown 片段）。
+// 仅统计 Ready 节点；没有可用于统计的 Ready 节点时返回空字符串。
+func BuildCapacitySummary(report *types.InspectionReport) string {
+	var (
+		totalMemoryUsage float64
+		totalPodCount    int
+		nodeCount        int
+		highMemNodes     []types.NodeStatus
+		lowMemNodes      []types.NodeStatus
+		highPodNodes     []types.NodeStatus
+		lowPodNodes      []types.NodeStatus
+	)
+
+	for _, node := range report.Nodes {
+		if node.Status != "Ready" {
+			continue
+		}
+		totalMemoryUsage += node.MemoryUsage
+		totalPodCount += node.PodCount
+		nodeCount++
+
+		switch {
+		case node.MemoryUsage > capacityHighMemoryThreshold:
+			highMemNodes = append(highMemNodes, node)
+		case node.MemoryUsage < capacityLowMemoryThreshold:
+			lowMemNodes = append(lowMemNodes, node)
+		}
+
+		switch {
+		case node.PodCount > capacityHighPodThreshold:
+			highPodNodes = append(highPodNodes, node)
+		case node.PodCount < capacityLowPodThreshold:
+			lowPodNodes = append(lowPodNodes, node)
+		}
+	}
+
+	if nodeCount == 0 {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.WriteString("\n\n**📊 容量优化指标**\n")
+	builder.WriteString(fmt.Sprintf("- 集群平均内存使用率: %.1f%%\n", totalMemoryUsage/float64(nodeCount)))
+	builder.WriteString(fmt.Sprintf("- 集群平均POD密度: %d个/节点\n", totalPodCount/nodeCount))
+	builder.WriteString(fmt.Sprintf("- 高内存使用率节点 (>%d%%): %d\n", capacityHighMemoryThreshold, len(highMemNodes)))
+	builder.WriteString(fmt.Sprintf("- 低内存使用率节点 (<%d%%): %d\n", capacityLowMemoryThreshold, len(lowMemNodes)))
+	builder.WriteString(fmt.Sprintf("- 高POD密度节点 (>%d个): %d\n", capacityHighPodThreshold, len(highPodNodes)))
+	builder.WriteString(fmt.Sprintf("- 低POD密度节点 (<%d个): %d\n", capacityLowPodThreshold, len(lowPodNodes)))
+
+	appendNodeList := func(title string, nodes []types.NodeStatus) {
+		if len(nodes) == 0 {
+			return
+		}
+		builder.WriteString(fmt.Sprintf("\n**⚠️ %s** (%d个)\n", title, len(nodes)))
+		displayCount := len(nodes)
+		if displayCount > capacityMaxDisplayNodes {
+			displayCount = capacityMaxDisplayNodes
+		}
+		for i := 0; i < displayCount; i++ {
+			builder.WriteString(fmt.Sprintf("- %s: 内存使用率 %.1f%%, POD数量 %d\n",
+				nodes[i].Name, nodes[i].MemoryUsage, nodes[i].PodCount))
+		}
+		if len(nodes) > capacityMaxDisplayNodes {
+			builder.WriteString(fmt.Sprintf("- ... 还有 %d 个节点，请查看完整报告\n", len(nodes)-capacityMaxDisplayNodes))
+		}
+	}
+
+	// 高内存、高密度节点优先展示明细；低负载节点只提示数量
+	appendNodeList("高内存使用率节点", highMemNodes)
+	appendNodeList("高POD密度节点", highPodNodes)
+	if len(lowMemNodes) > 0 {
+		builder.WriteString(fmt.Sprintf("\n**⚠️ 低内存使用率节点** (%d个)，请查看完整报告了解详情\n", len(lowMemNodes)))
+	}
+	if len(lowPodNodes) > 0 {
+		builder.WriteString(fmt.Sprintf("**⚠️ 低POD密度节点** (%d个)，请查看完整报告了解详情\n", len(lowPodNodes)))
+	}
+
+	builder.WriteString("\n💡 完整节点详细信息请查看HTML报告\n")
+	return builder.String()
 }
 
 // 构建企业微信通知消息
@@ -319,8 +298,11 @@ func BuildNotificationMessage(report *types.InspectionReport, config *config.Con
 	builder.WriteString(fmt.Sprintf("- 核心组件: %d/%d 健康\n",
 		countHealthyComponents(report.Components), len(report.Components)))
 
-	// 报告链接
-	builder.WriteString(fmt.Sprintf("\n[🔗 查看完整报告](http://k8s-reports.xx/reports/%s)", report.Metadata.ReportFile))
+	// 报告链接（配置 REPORT_BASE_URL 后展示）
+	if config.ReportBaseURL != "" {
+		builder.WriteString(fmt.Sprintf("\n[🔗 查看完整报告](%s/%s)",
+			strings.TrimRight(config.ReportBaseURL, "/"), report.Metadata.ReportFile))
+	}
 
 	if builder.Len() == 0 {
 		return "⚠️ 巡检报告内容为空，请检查数据源"

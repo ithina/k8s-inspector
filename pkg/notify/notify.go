@@ -1,8 +1,8 @@
-﻿// Package notify provides notification abstractions for inspection reports.
+// Package notify provides notification abstractions for inspection reports.
 package notify
 
 import (
-	"k8s-inspector/pkg/notify/wechat"
+	"github.com/ithina/k8s-inspector/pkg/notify/wechat"
 )
 
 // 创建企业微信通知器实例

@@ -1,13 +1,21 @@
-﻿---
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-inspector
+  labels:
+    app.kubernetes.io/name: k8s-inspector
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: k8s-inspector
-  namespace: k8s
+  namespace: k8s-inspector
   labels:
     app.kubernetes.io/name: k8s-inspector
     app.kubernetes.io/component: inspector
 ---
+# 最小权限：只读 nodes/pods/namespaces
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -16,7 +24,7 @@ metadata:
     app.kubernetes.io/name: k8s-inspector
 rules:
 - apiGroups: [""]
-  resources: ["nodes", "pods", "namespaces", "componentstatuses"]
+  resources: ["nodes", "pods", "namespaces"]
   verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -32,18 +40,32 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: k8s-inspector
-  namespace: k8s
+  namespace: k8s-inspector
+---
+# 报告持久化存储（按集群实际情况调整 storageClassName 等参数）
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k8s-inspector-reports
+  namespace: k8s-inspector
+  labels:
+    app.kubernetes.io/name: k8s-inspector
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: k8s-inspector
-  namespace: k8s
+  namespace: k8s-inspector
   labels:
     app.kubernetes.io/name: k8s-inspector
     app.kubernetes.io/component: inspector
 spec:
-  schedule: "30 9,18 * * *"
+  schedule: "30 9,18 * * *" # 每天 09:30 / 18:30 执行
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 1
@@ -55,8 +77,9 @@ spec:
           restartPolicy: OnFailure
           serviceAccountName: k8s-inspector
           initContainers:
-          - name: fix-permissions
-            image: harbor.xx/ic/alpine:3.19.7
+          # 修正 PVC 挂载目录属主，供非 root 巡检容器写入报告
+          - name: init-reports
+            image: alpine:3.19.7
             command: ["sh", "-c", "mkdir -p /app/reports && chown -R 700:700 /app/reports"]
             resources:
               requests:
@@ -70,35 +93,52 @@ spec:
               mountPath: /app/reports
           containers:
           - name: inspector
-            image: harbor.xx/ic/inspector:v2.0
+            image: ghcr.io/ithina/k8s-inspector:latest
+            # 单次执行；如需常驻循环巡检可改为 ["--interval", "1h"]
+            args: ["--once"]
             env:
-            - name: DIFY_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: dify-key
-                  key: api_key
-            - name: DIFY_BASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: dify-url
-                  key: base_url
+            # ── 必填 ──
+            - name: CLUSTER_NAME
+              value: "kubernetes"
+            - name: REPORT_CLUSTER_NAME
+              value: "my-cluster"
+            # ── 可选：Prometheus 指标（未配置时跳过资源使用率采集） ──
+            - name: PROMETHEUS_URL
+              value: "http://prometheus.monitoring.svc:9090"
+            # ── 可选：通知与 AI 分析，通过 Secret 注入 ──
+            # kubectl -n k8s-inspector create secret generic k8s-inspector-secrets \
+            #   --from-literal=wechat-webhook='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx' \
+            #   --from-literal=dify-api-key='app-xxx' \
+            #   --from-literal=dify-base-url='https://api.dify.ai/v1/chat-messages'
             - name: WECHAT_WEBHOOK
               valueFrom:
                 secretKeyRef:
-                  name: wechatiser
-                  key: webhook-url
-            - name: PROMETHEUS_URL
-              value: "http://prometheus-k8s-monitoring-apps.xx"
-            - name: CLUSTER_NAME
-              value: kubernetes
-            - name: REPORT_CLUSTER_NAME
-              value: "K8s业务集群"
+                  name: k8s-inspector-secrets
+                  key: wechat-webhook
+                  optional: true
+            - name: DIFY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: k8s-inspector-secrets
+                  key: dify-api-key
+                  optional: true
+            - name: DIFY_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: k8s-inspector-secrets
+                  key: dify-base-url
+                  optional: true
+            # ── 可选：其他配置 ──
+            - name: EXCLUDE_NAMESPACES
+              value: "k8s-inspector" # 逗号分隔，跳过自身命名空间
             - name: CRITICAL_THRESHOLD
               value: "90"
             - name: WARNING_THRESHOLD
               value: "80"
             - name: MAX_CONCURRENCY
               value: "10"
+            # - name: REPORT_BASE_URL
+            #   value: "https://reports.example.com/reports"
             resources:
               requests:
                 cpu: 200m
@@ -106,12 +146,16 @@ spec:
               limits:
                 cpu: 500m
                 memory: 512Mi
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 700
+              runAsGroup: 700
             volumeMounts:
             - name: reports
               mountPath: /app/reports
           volumes:
           - name: reports
             persistentVolumeClaim:
-              claimName: inspection-reports
-          nodeSelector:
-            ainspector: "true"
+              claimName: k8s-inspector-reports
+          # nodeSelector: # 如需固定调度节点可开启
+          #   kubernetes.io/os: linux

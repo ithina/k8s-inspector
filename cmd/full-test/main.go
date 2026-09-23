@@ -3,11 +3,13 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
-	"k8s-inspector/pkg/config"
-	"k8s-inspector/pkg/service/report"
-	"k8s-inspector/pkg/types"
+	"github.com/ithina/k8s-inspector/pkg/config"
+	"github.com/ithina/k8s-inspector/pkg/service/report"
+	"github.com/ithina/k8s-inspector/pkg/types"
 
 	"go.uber.org/zap"
 )
@@ -202,28 +204,11 @@ func createMockInspectionReport(cfg *config.Config) *types.InspectionReport {
 
 // 查找生成的报告文件
 func findReportFiles(reportDir string) {
-	// 处理报告目录，确保在不同操作系统下都能正确工作
-	processedReportDir := reportDir
-
-	// 在Windows环境下，将Linux风格的路径转换为Windows风格的路径
-	if os.PathSeparator == '\\' {
-		// 如果是Windows系统，将/app/reports转换为当前驱动器下的app\reports目录
-		// 例如：D:\app\reports
-		currentDrive, err := os.Getwd()
-		if err == nil && len(currentDrive) > 1 && currentDrive[1] == ':' {
-			// 获取当前驱动器
-			processedReportDir = currentDrive[:2] + "\\app\\reports"
-		} else {
-			// 如果无法获取当前驱动器，使用默认驱动器
-			processedReportDir = "C:\\app\\reports"
-		}
-	}
-
-	// 获取报告目录的绝对路径
-	reportDirAbs, err := getAbsolutePath(processedReportDir)
+	// 获取报告目录的绝对路径（跨平台）
+	reportDirAbs, err := filepath.Abs(reportDir)
 	if err != nil {
 		fmt.Printf("无法获取报告目录的绝对路径: %v\n", err)
-		reportDirAbs = processedReportDir
+		reportDirAbs = reportDir
 	}
 
 	fmt.Printf("报告目录: %s\n", reportDirAbs)
@@ -237,7 +222,7 @@ func findReportFiles(reportDir string) {
 
 	htmlFiles := []string{}
 	for _, file := range files {
-		if !file.IsDir() && hasSuffixIgnoreCase(file.Name(), ".html") {
+		if !file.IsDir() && strings.HasSuffix(strings.ToLower(file.Name()), ".html") {
 			htmlFiles = append(htmlFiles, file.Name())
 		}
 	}
@@ -249,7 +234,7 @@ func findReportFiles(reportDir string) {
 
 	fmt.Printf("✅ 找到 %d 个HTML报告文件:\n", len(htmlFiles))
 	for _, file := range htmlFiles {
-		filePath := reportDirAbs + string(os.PathSeparator) + file
+		filePath := filepath.Join(reportDirAbs, file)
 		fmt.Printf("   - %s\n", filePath)
 
 		// 检查文件大小
@@ -266,55 +251,9 @@ func findReportFiles(reportDir string) {
 	fmt.Println("\n📝 如何打开报告:")
 	if len(htmlFiles) > 0 {
 		latestFile := htmlFiles[len(htmlFiles)-1]
-		latestFilePath := reportDirAbs + string(os.PathSeparator) + latestFile
+		latestFilePath := filepath.Join(reportDirAbs, latestFile)
 		fmt.Printf("1. 复制以下路径到文件资源管理器地址栏:\n   %s\n", reportDirAbs)
 		fmt.Printf("2. 双击打开文件: %s\n", latestFile)
 		fmt.Printf("3. 或直接复制完整路径到浏览器地址栏:\n   file://%s\n", latestFilePath)
 	}
-}
-
-// 获取文件或目录的绝对路径
-func getAbsolutePath(path string) (string, error) {
-	if path == "" {
-		return "", fmt.Errorf("路径不能为空")
-	}
-
-	// 如果已经是绝对路径，直接返回
-	if path[0] == '/' || (len(path) > 1 && path[1] == ':') {
-		return path, nil
-	}
-
-	// 获取当前工作目录
-	currentDir, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("获取当前工作目录失败: %w", err)
-	}
-
-	// 拼接绝对路径
-	absPath := currentDir + "/" + path
-	return absPath, nil
-}
-
-// 忽略大小写检查文件后缀
-func hasSuffixIgnoreCase(s, suffix string) bool {
-	if len(s) < len(suffix) {
-		return false
-	}
-
-	sLower := s[len(s)-len(suffix):]
-	for i := 0; i < len(sLower); i++ {
-		c1 := sLower[i]
-		c2 := suffix[i]
-		if c1 >= 'A' && c1 <= 'Z' {
-			c1 += 'a' - 'A'
-		}
-		if c2 >= 'A' && c2 <= 'Z' {
-			c2 += 'a' - 'A'
-		}
-		if c1 != c2 {
-			return false
-		}
-	}
-
-	return true
 }

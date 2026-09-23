@@ -1,4 +1,4 @@
-module k8s-inspector
+module github.com/ithina/k8s-inspector
 
 go 1.23.9
 

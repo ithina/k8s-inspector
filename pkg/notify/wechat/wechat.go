@@ -1,4 +1,4 @@
-﻿// Package wechat implements an enterprise WeChat (企业微信) notifier
+// Package wechat implements an enterprise WeChat (企业微信) notifier
 // that sends Markdown-formatted inspection reports via webhook.
 package wechat
 
@@ -37,7 +37,7 @@ func (n *Notifier) SendMarkdownReport(content string) error {
 		return errors.New("企业微信Webhook未配置")
 	}
 	if len(content) > 4096 {
-		return fmt.Errorf("消息长度超过企业微信限制(当前%d字符)", len(content))
+		return fmt.Errorf("消息长度超过企业微信限制(当前%d字节)", len(content))
 	}
 	payload := map[string]interface{}{
 		"msgtype": "markdown",
@@ -58,9 +58,9 @@ func (n *Notifier) SendMarkdownReport(content string) error {
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		defer resp.Body.Close()
-
+		// 读取响应后立即关闭，避免重试循环中延迟释放连接
 		respBody, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		if readErr != nil {
 			lastErr = fmt.Errorf("读取响应失败: %w", readErr)
 			time.Sleep(2 * time.Second)

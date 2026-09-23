@@ -1,0 +1,80 @@
+name: Release
+
+# 发布工作流：推送 v* tag 自动创建 GitHub Release（标题为 tag 版本号，
+# 说明优先取 CHANGELOG.md 中对应版本段落），也可在 Actions 页面
+# 手动指定 tag 补发历史版本的 Release。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布 Release 的 tag（例如 v1.0.1）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 拉取完整历史与全部 tag，用于读取 tag 对应提交的 CHANGELOG 与标签说明
+          fetch-depth: 0
+
+      - name: 确定目标 tag
+        id: tag
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: 从 CHANGELOG 提取发布说明
+        id: notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          VER="${TAG#v}"
+          # 从指定 CHANGELOG 中提取版本段落（首参为文件内容来源，次参为段名）
+          extract() {
+            awk -v section="## [${2}]" '
+              index($0, section) == 1 { found = 1; next }
+              found && /^## \[/ { exit }
+              found { print }
+            '
+          }
+          # 优先：master 最新 CHANGELOG 的对应版本段（发布时已转正；
+          # tag push 时检出的是 tag 提交，CHANGELOG 可能尚未转正）
+          git show origin/master:CHANGELOG.md | extract - "$VER" > notes.md
+          # 兑底一：tag 对应提交的 [Unreleased] 段（CHANGELOG 未转正的旧 tag）
+          if [ ! -s notes.md ]; then
+            git show "$TAG":CHANGELOG.md | extract - "Unreleased" > notes.md
+          fi
+          # 兑底二：附注标签自身的说明文字
+          if [ ! -s notes.md ]; then
+            git tag -l --format='%(contents)' "$TAG" > notes.md
+          fi
+          echo "已生成发布说明："
+          cat notes.md
+
+      - name: 创建或发布 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # 已存在（可能因 tag 重建被转为草稿）：转正发布并同步标题与说明
+            echo "Release $TAG 已存在，确保其为发布状态并更新说明"
+            gh release edit "$TAG" -R "$GITHUB_REPOSITORY" \
+              --draft=false \
+              --title "$TAG" \
+              --notes-file notes.md
+            exit 0
+          fi
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --verify-tag \
+            --notes-file notes.md
