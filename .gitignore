@@ -1,0 +1,35 @@
+﻿# Binaries
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+inspector
+
+# Test
+*.test
+*.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+debug.log
+*.log
+
+# Reports
+/app/reports/
+reports/
+
+# Go
+vendor/

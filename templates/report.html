@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{.Report.Metadata.ClusterName}} 巡检报告</title>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 1200px; margin: 0 auto; padding: 20px; }
+        h1 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #2980b9; margin-top: 30px; border-left: 4px solid #3498db; padding-left: 10px; }
+        h3 { color: #16a085; }
+        .metadata { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #3498db; color: white; font-weight: bold; }
+        tr:nth-child(even) { background-color: #f2f2f2; }
+        tr:hover { background-color: #e9f7fe; }
+        .critical { color: #e74c3c; font-weight: bold; }
+        .warning { color: #f39c12; font-weight: bold; }
+        .healthy { color: #27ae60; }
+        .summary-card { background-color: #fff; border-radius: 5px; padding: 15px; margin: 15px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .summary-title { font-size: 1.2em; font-weight: bold; margin-bottom: 10px; color: #2c3e50; }
+        .badge { display: inline-block; padding: 3px 7px; font-size: 12px; font-weight: bold; color: white; border-radius: 10px; }
+        .badge-critical { background-color: #e74c3c; }
+        .badge-warning { background-color: #f39c12; }
+        .badge-healthy { background-color: #27ae60; }
+        .component-status { margin-left: 10px; }
+        .memory-alert { margin-top: 4px; padding: 3px 8px; background: #fff3cd; border: 1px solid #ffd700; border-radius: 4px; color: #856404; font-size: 0.85em; }
+        .memory-alert:hover { background: #ffeeba; }
+        .condition-container { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0; }
+        .condition-item { background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 15px; padding: 4px 12px; display: inline-flex; align-items: center; white-space: nowrap; position: relative; }
+        .condition-icon { margin-right: 6px; font-size: 1.2em; color: #27ae60; }
+        .status-normal { color: #28a745; }
+        .status-abnormal { color: #dc3545; font-weight: bold; }
+        .condition-summary:hover::after { content: attr(data-tooltip); position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(100% + 8px); background: #fff; border: 2px solid #3498db; box-shadow: 0 3px 6px rgba(0,0,0,0.15); color: #333; z-index: 1000; text-align: left; max-width: 470px !important; min-width: 370px; white-space: pre-line; line-height: 1.8; padding: 20px; text-align: justify; font-size: 14px; border-radius: 8px; }
+        .condition-summary:hover::before { content: ''; position: absolute; left: 50%; transform: translateX(-50%); bottom: 100%; border: 6px solid transparent; border-top-color: #3498db; margin-bottom: -4px; }
+        @media (max-width: 768px) {
+            .condition-summary:hover::after { left: 0; transform: none; right: 0; width: 90vw; }
+        }
+        .resource-overview { background: linear-gradient(145deg, #f8f9fa 0%, #ffffff 100%); border: 1px solid #e0e0e0; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .resource-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 25px; padding: 15px 0; }
+        .resource-item { padding: 15px; border-radius: 8px; background: rgba(255,255,255,0.9); transition: transform 0.2s; }
+        .resource-item:hover { transform: translateY(-3px); }
+        .resource-header { display: flex; align-items: center; margin-bottom: 12px; }
+        .icon { font-size: 1.8em; margin-right: 10px; }
+        .label { font-weight: 600; color: #2c3e50; }
+        /* 修复进度条样式 */
+        .resource-progress {
+            background: #e9ecef;
+            border-radius: 8px;
+            height: 18px;
+            margin-bottom: 8px;
+            overflow: hidden;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #4fc3f7 0%, #1976d2 100%);
+            transition: width 0.5s;
+        }
+        .resource-in-table {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+        }
+        .resource-bar-container {
+            flex-grow: 1;
+            height: 20px;
+            background-color: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .resource-bar {
+            height: 100%;
+            transition: width 0.5s ease-in-out;
+        }
+        .resource-value {
+            width: 50px;
+            text-align: right;
+            font-weight: 600;
+            font-size: 0.9em;
+        }
+        .healthy-bg { background: linear-gradient(90deg, #20c997 0%, #28a745 100%); }
+        .warning-bg { background: linear-gradient(90deg, #fd7e14 0%, #ffc107 100%); }
+        .critical-bg { background: linear-gradient(90deg, #dc3545 0%, #e74c3c 100%); }
+    </style>
+</head>
+<body>
+    <div class="metadata">
+        <p><strong>集群名称:</strong> {{.Report.Metadata.ClusterName}}</p>
+        <p><strong>生成时间:</strong> {{.Report.Metadata.GeneratedAt}}</p>
+        <p><strong>执行耗时:</strong> {{.Report.Metadata.Duration}}</p>
+        <p><strong>报告格式:</strong> {{.Report.Metadata.ReportFormat}}</p>
+    </div>
+    <div class="summary-card resource-overview">
+        <div class="summary-title">📊 集群资源概览</div>
+        <div class="resource-grid">
+            <div class="resource-item cpu">
+                <div class="resource-header">
+                    <span class="icon">⚡</span>
+                    <span class="label">CPU总使用率</span>
+                </div>
+                <div class="resource-progress">
+                    <div class="progress-bar"
+                         style="width: {{.Report.Metadata.ClusterCPUUsage}}%;
+                         {{if ge .Report.Metadata.ClusterCPUUsage 90.0}}
+                            background: linear-gradient(90deg, #ff6b6b 0%, #c0392b 100%);
+                         {{else if ge .Report.Metadata.ClusterCPUUsage 80.0}}
+                            background: linear-gradient(90deg, #ffd86b 0%, #f39c12 100%);
+                         {{else}}
+                            background: linear-gradient(90deg, #4fc3f7 0%, #27ae60 100%);
+                         {{end}}">
+                    </div>
+                </div>
+                <div class="resource-value {{if gt .Report.Metadata.ClusterCPUUsage (toFloat64 $.Config.CriticalThreshold)}}critical{{else if gt .Report.Metadata.ClusterCPUUsage (toFloat64 $.Config.WarningThreshold)}}warning{{else}}healthy{{end}}">
+                    {{printf "%.1f" .Report.Metadata.ClusterCPUUsage}}%
+                </div>
+            </div>
+            <div class="resource-item memory">
+                <div class="resource-header">
+                    <span class="icon">📈</span>
+                    <span class="label">内存总使用率</span>
+                </div>
+                <div class="resource-progress">
+                    <div class="progress-bar"
+                         style="width: {{.Report.Metadata.ClusterMemoryUsage}}%;
+                         {{if ge .Report.Metadata.ClusterMemoryUsage 90.0}}
+                            background: linear-gradient(90deg, #ff6b6b 0%, #c0392b 100%);
+                         {{else if ge .Report.Metadata.ClusterMemoryUsage 80.0}}
+                            background: linear-gradient(90deg, #ffd86b 0%, #f39c12 100%);
+                         {{else}}
+                            background: linear-gradient(90deg, #4fc3f7 0%, #27ae60 100%);
+                         {{end}}">
+                    </div>
+                </div>
+                <div class="resource-value {{if gt .Report.Metadata.ClusterMemoryUsage (toFloat64 $.Config.CriticalThreshold)}}critical{{else if gt .Report.Metadata.ClusterMemoryUsage (toFloat64 $.Config.WarningThreshold)}}warning{{else}}healthy{{end}}">
+                    {{printf "%.1f" .Report.Metadata.ClusterMemoryUsage}}%
+                </div>
+            </div>
+        </div>
+    </div>
+    {{if .Report.Findings.CriticalComponents}}
+    <div class="summary-card">
+        <div class="summary-title">核心组件异常</div>
+        <ul>
+            {{range .Report.Findings.CriticalComponents}}
+            <li class="critical">{{.}}</li>
+            {{end}}
+        </ul>
+    </div>
+    {{end}}
+    {{if .Report.Findings.CriticalNodes}}
+    <div class="summary-card">
+        <div class="summary-title">节点异常</div>
+        <ul>
+            {{range .Report.Findings.CriticalNodes}}
+            <li class="critical">{{.}}</li>
+            {{end}}
+        </ul>
+    </div>
+    {{end}}
+    <h2>核心组件状态</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>组件</th>
+                <th>命名空间</th>
+                <th>状态</th>
+                <th>Pod详情</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Report.Components}}
+            <tr>
+                <td>{{.Name}}</td>
+                <td>{{.Namespace}}</td>
+                <td>
+                    {{if eq .Healthy .Total}}
+                        <span class="badge badge-healthy">健康</span>
+                    {{else}}
+                        <span class="badge badge-critical">异常</span>
+                    {{end}}
+                    <span class="component-status">{{.Status}}</span>
+                </td>
+                <td>
+                    {{range .Pods}}
+                    <div>
+                        {{.Name}}: 
+                        {{if eq .Status "Running"}}
+                            <span class="healthy">{{.Status}}</span>
+                        {{else}}
+                            <span class="critical">{{.Status}}</span>
+                        {{end}}
+                        (重启:{{.RestartCount}}, 运行:{{.Age}})
+                        {{if .Message}}<br><small>{{.Message}}</small>{{end}}
+                    </div>
+                    {{end}}
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    <h2>Pod状态</h2>
+    <h3>按命名空间统计</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>命名空间</th>
+                <th>Running</th>
+                <th>Pending</th>
+                <th>Failed</th>
+                <th>其他</th>
+                <th>总数</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range $ns, $stats := .Report.Pods.ByNamespace}}
+            <tr>
+                <td>{{$ns}}</td>
+                <td>{{$stats.Running}}</td>
+                <td {{if gt $stats.Pending 0}}class="warning"{{else}}class="healthy"{{end}}>{{$stats.Pending}}</td>
+                <td {{if gt $stats.Failed 0}}class="critical"{{else}}class="healthy"{{end}}>{{$stats.Failed}}</td>
+                <td>{{$stats.Other}}</td>
+                <td>{{add $stats.Running $stats.Pending $stats.Failed $stats.Other}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    <h3>异常Pod列表</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>命名空间</th>
+                <th>Pod名称</th>
+                <th>状态</th>
+                <th>运行时间</th>
+                <th>重启次数</th>
+                <th>消息</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Report.Pods.AbnormalPodList}}
+            <tr>
+                <td>{{.Namespace}}</td>
+                <td>{{.Name}}</td>
+                <td {{if eq .Status "Failed"}}class="critical"{{else}}class="warning"{{end}}>{{.Status}}</td>
+                <td>{{.Age}}</td>
+                <td>{{.RestartCount}}</td>
+                <td>{{.Message}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    <h2>节点状态</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>节点名称</th>
+                <th>Kubelet版本</th>
+                <th style="width: 15%;">CPU使用率</th>
+                <th style="width: 15%;">内存使用率</th>
+                <th style="width: 15%;">磁盘使用率</th>
+                <th style="width: 10%;">POD数量</th>
+                <th>状态</th>
+                <th>条件</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Report.Nodes}}
+            <tr>
+                <td>{{.Name}}</td>
+                <td>{{.KubeletVersion}}</td>
+                <td>
+                    <div class="resource-in-table">
+                        <div class="resource-bar-container">
+                            <div class="resource-bar {{if gt .CPUUsage (toFloat64 $.Config.CriticalThreshold)}}critical-bg{{else if gt .CPUUsage (toFloat64 $.Config.WarningThreshold)}}warning-bg{{else}}healthy-bg{{end}}" style="width: {{printf "%.1f" .CPUUsage}}%;"></div>
+                        </div>
+                        <span class="resource-value {{if gt .CPUUsage (toFloat64 $.Config.CriticalThreshold)}}critical{{else if gt .CPUUsage (toFloat64 $.Config.WarningThreshold)}}warning{{else}}healthy{{end}}">{{printf "%.1f" .CPUUsage}}%</span>
+                    </div>
+                </td>
+                <td>
+                    <div class="resource-in-table">
+                        <div class="resource-bar-container">
+                            <div class="resource-bar {{if gt .MemoryUsage (toFloat64 $.Config.CriticalThreshold)}}critical-bg{{else if gt .MemoryUsage (toFloat64 $.Config.WarningThreshold)}}warning-bg{{else}}healthy-bg{{end}}" style="width: {{printf "%.1f" .MemoryUsage}}%;"></div>
+                        </div>
+                        <span class="resource-value {{if gt .MemoryUsage (toFloat64 $.Config.CriticalThreshold)}}critical{{else if gt .MemoryUsage (toFloat64 $.Config.WarningThreshold)}}warning{{else}}healthy{{end}}">{{printf "%.1f" .MemoryUsage}}%</span>
+                    </div>
+                </td>
+                <td>
+                    <div class="resource-in-table">
+                        <div class="resource-bar-container">
+                            <div class="resource-bar {{if ge .DiskUsage (toFloat64 $.Config.CriticalThreshold)}}critical-bg{{else if ge .DiskUsage (toFloat64 $.Config.WarningThreshold)}}warning-bg{{else}}healthy-bg{{end}}" style="width: {{printf "%.1f" .DiskUsage}}%;"></div>
+                        </div>
+                        <span class="resource-value {{if ge .DiskUsage (toFloat64 $.Config.CriticalThreshold)}}critical{{else if ge .DiskUsage (toFloat64 $.Config.WarningThreshold)}}warning{{else}}healthy{{end}}">{{printf "%.1f" .DiskUsage}}%</span>
+                    </div>
+                </td>
+                <td>
+                    <div class="resource-in-table">
+                        <span class="resource-value {{if ge .PodCount 80}}critical{{else if ge .PodCount 50}}warning{{else}}healthy{{end}}" style="font-size: 1.1em; font-weight: bold;">{{.PodCount}}</span>
+                    </div>
+                </td>
+                <td>
+                    {{if eq .Status "Ready"}}
+                        <span class="badge badge-healthy">✅ Ready</span>
+                    {{else}}
+                        <span class="badge badge-critical">❌ NotReady</span>
+                    {{end}}
+                </td>
+                <td>
+                    <div class="condition-container">
+                    {{range .Conditions}}
+                        <div class="condition-item">
+                            <span class="condition-icon">{{.Icon}}</span>
+                            <div class="condition-summary {{if eq .Status "False"}}status-normal{{else}}status-abnormal{{end}}"
+                                data-tooltip="🛠️ 条件类型: {{getConditionChinese .Type}}
+⏳ 检测状态: {{.Status | statusToChinese}}
+📌 主要原因: {{.Reason | reasonToChinese}}
+ℹ️ 详细描述: {{.Message}}">
+                                {{.DisplayText}}
+                            </div>
+                        </div>
+                    {{else}}
+                        <span style="font-size: 0.9em; color: #6c757d;">无</span>
+                    {{end}}
+                    </div>
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</body>
+</html>
